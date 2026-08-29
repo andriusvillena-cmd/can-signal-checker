@@ -1,0 +1,47 @@
+VERSION ""
+
+NS_ :
+    BA_
+    BA_DEF_
+    BA_DEF_DEF_
+    BO_TX_BU_
+    CM_
+    SG_MUL_VAL_
+    VAL_
+    VAL_TABLE_
+
+BS_:
+
+BU_: ABS_ECU SAS_ECU GATEWAY
+
+BO_ 192 BRAKE_01: 8 ABS_ECU
+ SG_ Brake_Pressure : 0|16@1+ (0.01,0) [0|250] "bar" GATEWAY
+ SG_ ABS_Active : 16|1@1+ (1,0) [0|1] "" GATEWAY
+ SG_ ESP_Active : 17|1@1+ (1,0) [0|1] "" GATEWAY
+ SG_ Brake_Alive_Counter : 20|4@1+ (1,0) [0|15] "" GATEWAY
+ SG_ Brake_Checksum : 24|8@1+ (1,0) [0|255] "" GATEWAY
+
+BO_ 208 WHEEL_SPEEDS_01: 8 ABS_ECU
+ SG_ Wheel_Speed_FL : 0|14@1+ (0.05,0) [0|400] "km/h" GATEWAY
+ SG_ Wheel_Speed_FR : 14|14@1+ (0.05,0) [0|400] "km/h" GATEWAY
+ SG_ Wheel_Speed_RL : 28|14@1+ (0.05,0) [0|400] "km/h" GATEWAY
+ SG_ Wheel_Speed_RR : 42|14@1+ (0.05,0) [0|400] "km/h" GATEWAY
+ SG_ Wheel_Alive_Counter : 56|4@1+ (1,0) [0|15] "" GATEWAY
+
+BO_ 160 VEHICLE_DYN_01: 8 ABS_ECU
+ SG_ Vehicle_Speed : 0|16@1+ (0.01,0) [0|400] "km/h" GATEWAY
+ SG_ Yaw_Rate : 16|16@1+ (0.01,-180) [-180|180] "deg/s" GATEWAY
+ SG_ Lat_Accel : 32|16@1+ (0.001,-32) [-32|32] "g" GATEWAY
+ SG_ Long_Accel : 48|16@1+ (0.001,-32) [-32|32] "g" GATEWAY
+
+BO_ 432 STEERING_01: 4 SAS_ECU
+ SG_ Steering_Angle : 0|16@1+ (0.1,-3276.8) [-780|780] "deg" GATEWAY
+ SG_ Steering_Rate : 16|12@1+ (1,-2048) [-2048|2047] "deg/s" GATEWAY
+ SG_ Steering_Alive_Counter : 28|4@1+ (1,0) [0|15] "" GATEWAY
+
+CM_ BO_ 192 "Estado del sistema de frenos. Ciclo 10 ms.";
+CM_ BO_ 208 "Velocidades de las cuatro ruedas. Ciclo 20 ms.";
+CM_ BO_ 160 "Dinamica del vehiculo. Ciclo 20 ms.";
+CM_ BO_ 432 "Sensor de angulo de volante. Ciclo 10 ms.";
+CM_ SG_ 192 Brake_Alive_Counter "Contador rodante 0-15. Debe incrementar en 1 cada trama.";
+CM_ SG_ 208 Wheel_Alive_Counter "Contador rodante 0-15. Debe incrementar en 1 cada trama.";
