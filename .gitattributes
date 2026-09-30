@@ -1,0 +1,3 @@
+# The .asc file is a CAN log, not source code. Without this, GitHub counts its
+# 200 KB towards the language bar and labels the whole repository AGS Script.
+*.asc linguist-detectable=false
