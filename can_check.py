@@ -1,12 +1,17 @@
-"""can-signal-checker: valida un log CAN contra su matriz DBC.
+"""can-signal-checker: validate a CAN log against its DBC matrix.
 
-Uso:
-    python can_check.py <log.asc> <matriz.dbc> [segundos_maximos]
+Usage:
+    python can_check.py <log.asc> <matrix.dbc> [max_seconds]
 
-Comprueba tres cosas:
-    1. Timeout        - un mensaje deja de transmitirse
-    2. Contador       - el contador rodante no incrementa de uno en uno
-    3. Plausibilidad  - una rueda parada con el vehiculo en movimiento
+Three checks:
+    1. Timeout       - a message stops being transmitted
+    2. Counter       - the rolling counter does not increment by one
+    3. Plausibility  - one wheel stopped while the vehicle is moving
+
+Each of the three catches something the other two cannot. A frame can carry
+values that are all in range and still be wrong, because it arrived late,
+because the counter says frames were lost on the way, or because it contradicts
+its neighbours.
 """
 
 import sys
@@ -16,165 +21,178 @@ import cantools
 import numpy as np
 import pandas as pd
 
-# Ciclo nominal de cada mensaje, en milisegundos
-CICLOS_MS = {
+# Nominal cycle time of each message, in milliseconds
+CYCLE_MS = {
     "BRAKE_01":        10,
     "STEERING_01":     10,
     "WHEEL_SPEEDS_01": 20,
     "VEHICLE_DYN_01":  20,
 }
 
-# Se declara timeout cuando el hueco supera este numero de ciclos
-FACTOR_TIMEOUT = 5
+# A gap longer than this many nominal cycles counts as a timeout
+TIMEOUT_FACTOR = 5
 
-# Contadores rodantes: mensaje -> senal
-CONTADORES = {
+# Rolling counters: message -> signal
+COUNTERS = {
     "BRAKE_01":        "Brake_Alive_Counter",
     "WHEEL_SPEEDS_01": "Wheel_Alive_Counter",
     "STEERING_01":     "Steering_Alive_Counter",
 }
 
+WHEELS = ["Wheel_Speed_FL", "Wheel_Speed_FR", "Wheel_Speed_RL", "Wheel_Speed_RR"]
 
-def cargar_log(ruta_log, ruta_dbc):
-    """Decodifica el log entero y devuelve una tabla, una fila por trama."""
-    db = cantools.database.load_file(ruta_dbc)
-    filas = []
+# A wheel reading below this is treated as stopped, and the others are treated
+# as turning above the second. The gap between them is deliberate: it keeps the
+# check quiet while the car is rolling to a halt and all four are near zero.
+WHEEL_STOPPED_KPH = 1.0
+WHEEL_TURNING_KPH = 5.0
 
-    with can.ASCReader(ruta_log) as lector:
-        for trama in lector:
+
+def load_log(log_path, dbc_path):
+    """Decode the whole log and return a table, one row per frame."""
+    db = cantools.database.load_file(dbc_path)
+    rows = []
+
+    with can.ASCReader(log_path) as reader:
+        for frame in reader:
             try:
-                mensaje = db.get_message_by_frame_id(trama.arbitration_id)
+                message = db.get_message_by_frame_id(frame.arbitration_id)
             except KeyError:
-                continue                      # ID que no esta en el DBC
+                continue                      # an ID the DBC does not describe
 
-            fila = {"t": trama.timestamp, "mensaje": mensaje.name}
-            fila.update({n: float(v) for n, v in mensaje.decode(trama.data).items()})
-            filas.append(fila)
+            row = {"t": frame.timestamp, "message": message.name}
+            row.update({n: float(v) for n, v in message.decode(frame.data).items()})
+            rows.append(row)
 
-    return pd.DataFrame(filas)
+    return pd.DataFrame(rows)
 
 
-def comprobar_timeout(tabla, nombre, ciclo_ms):
-    """Un mensaje que deja de llegar durante mas de FACTOR_TIMEOUT ciclos."""
-    tramas = tabla[tabla["mensaje"] == nombre]
-    if len(tramas) < 2:
+def check_timeout(table, name, cycle_ms):
+    """A message that stops arriving for more than TIMEOUT_FACTOR cycles."""
+    frames = table[table["message"] == name]
+    if len(frames) < 2:
         return None
 
-    instantes = tramas["t"].to_numpy()
-    huecos = np.diff(instantes) * 1000
-    limite = ciclo_ms * FACTOR_TIMEOUT
+    times = frames["t"].to_numpy()
+    gaps = np.diff(times) * 1000
+    limit = cycle_ms * TIMEOUT_FACTOR
 
-    if huecos.max() <= limite:
+    if gaps.max() <= limit:
         return None
 
-    peor = int(np.argmax(huecos))
+    worst = int(np.argmax(gaps))
     return {
-        "tipo": "timeout",
-        "donde": nombre,
-        "inicio": float(instantes[peor]),
-        "fin": float(instantes[peor + 1]),
-        "detalle": f"hueco de {huecos.max():.0f} ms, ciclo nominal {ciclo_ms} ms",
+        "kind": "timeout",
+        "where": name,
+        "start": float(times[worst]),
+        "end": float(times[worst + 1]),
+        "detail": f"gap of {gaps.max():.0f} ms, nominal cycle {cycle_ms} ms",
     }
 
 
-def comprobar_contador(tabla, nombre, senal):
-    """El contador rodante debe incrementar de uno en uno, modulo 16."""
-    tramas = tabla[tabla["mensaje"] == nombre]
-    if len(tramas) < 2 or senal not in tramas:
+def check_counter(table, name, signal):
+    """The rolling counter must increment by one every frame, modulo 16."""
+    frames = table[table["message"] == name]
+    if len(frames) < 2 or signal not in frames:
         return None
 
-    instantes = tramas["t"].to_numpy()
-    valores = tramas[senal].to_numpy()
+    times = frames["t"].to_numpy()
+    values = frames[signal].to_numpy()
 
-    saltos = [i for i in range(1, len(valores))
-              if (valores[i] - valores[i - 1]) % 16 != 1]
+    jumps = [i for i in range(1, len(values))
+             if (values[i] - values[i - 1]) % 16 != 1]
 
-    if not saltos:
+    if not jumps:
         return None
 
-    primero = saltos[0]
+    first = jumps[0]
     return {
-        "tipo": "contador",
-        "donde": f"{nombre}.{senal}",
-        "inicio": float(instantes[primero]),
-        "fin": float(instantes[saltos[-1]]),
-        "detalle": f"{len(saltos)} saltos, el primero {int(valores[primero - 1])} -> {int(valores[primero])}",
+        "kind": "counter",
+        "where": f"{name}.{signal}",
+        "start": float(times[first]),
+        "end": float(times[jumps[-1]]),
+        "detail": f"{len(jumps)} jumps, the first {int(values[first - 1])} -> {int(values[first])}",
     }
 
 
-def comprobar_plausibilidad(tabla):
-    """Una rueda parada mientras las otras giran no es fisicamente posible."""
-    ruedas = tabla[tabla["mensaje"] == "WHEEL_SPEEDS_01"]
-    if ruedas.empty:
-        return None
+def check_plausibility(table):
+    """One wheel stopped while the other three turn is not physically possible."""
+    wheels = table[table["message"] == "WHEEL_SPEEDS_01"]
+    if wheels.empty:
+        return []
 
-    nombres = ["Wheel_Speed_FL", "Wheel_Speed_FR", "Wheel_Speed_RL", "Wheel_Speed_RR"]
-    hallazgos = []
+    findings = []
 
-    for parada in nombres:
-        otras = [n for n in nombres if n != parada]
-        sospechosas = ruedas[(ruedas[parada] < 1.0) & (ruedas[otras].min(axis=1) > 5.0)]
+    for stopped in WHEELS:
+        others = [n for n in WHEELS if n != stopped]
+        suspect = wheels[(wheels[stopped] < WHEEL_STOPPED_KPH)
+                         & (wheels[others].min(axis=1) > WHEEL_TURNING_KPH)]
 
-        if sospechosas.empty:
+        if suspect.empty:
             continue
 
-        hallazgos.append({
-            "tipo": "plausibilidad",
-            "donde": parada,
-            "inicio": float(sospechosas["t"].iloc[0]),
-            "fin": float(sospechosas["t"].iloc[-1]),
-            "detalle": f"{len(sospechosas)} tramas a 0 km/h con las otras tres girando",
+        findings.append({
+            "kind": "plausibility",
+            "where": stopped,
+            "start": float(suspect["t"].iloc[0]),
+            "end": float(suspect["t"].iloc[-1]),
+            "detail": f"{len(suspect)} frames at 0 km/h with the other three turning",
         })
 
-    return hallazgos
+    return findings
 
 
-def analizar(tabla):
-    """Pasa las tres comprobaciones y devuelve la lista de hallazgos."""
-    hallazgos = []
+def analyse(table):
+    """Run the three checks and return the findings, earliest first."""
+    findings = []
 
-    for nombre, ciclo in CICLOS_MS.items():
-        hallazgo = comprobar_timeout(tabla, nombre, ciclo)
-        if hallazgo:
-            hallazgos.append(hallazgo)
+    for name, cycle in CYCLE_MS.items():
+        finding = check_timeout(table, name, cycle)
+        if finding:
+            findings.append(finding)
 
-    for nombre, senal in CONTADORES.items():
-        hallazgo = comprobar_contador(tabla, nombre, senal)
-        if hallazgo:
-            hallazgos.append(hallazgo)
+    for name, signal in COUNTERS.items():
+        finding = check_counter(table, name, signal)
+        if finding:
+            findings.append(finding)
 
-    hallazgos.extend(comprobar_plausibilidad(tabla) or [])
+    findings.extend(check_plausibility(table))
 
-    hallazgos.sort(key=lambda h: h["inicio"])
-    return hallazgos
+    findings.sort(key=lambda f: f["start"])
+    return findings
 
 
-def main():
-    if len(sys.argv) < 3:
-        print(__doc__)
-        sys.exit(1)
+def report(findings, table, log_path):
+    """Print the findings the way an engineer would want to read them."""
+    print(f"\n{log_path}")
+    print(f"{len(table)} frames   {table['t'].max():.2f} s   "
+          f"{len(findings)} findings\n")
 
-    ruta_log, ruta_dbc = sys.argv[1], sys.argv[2]
-
-    tabla = cargar_log(ruta_log, ruta_dbc)
-
-    if len(sys.argv) > 3:
-        limite = float(sys.argv[3])
-        tabla = tabla[tabla["t"] <= limite]
-        print(f"Analizando solo hasta t = {limite} s")
-
-    hallazgos = analizar(tabla)
-
-    print(f"\n{ruta_log}")
-    print(f"{len(tabla)} tramas   {tabla['t'].max():.2f} s   {len(hallazgos)} hallazgos\n")
-
-    if not hallazgos:
-        print("  Sin hallazgos. Comunicacion correcta.")
+    if not findings:
+        print("  No findings. Communication is sound.")
         return
 
-    for h in hallazgos:
-        print(f"  {h['tipo']:15} {h['donde']:28} "
-              f"{h['inicio']:6.2f} - {h['fin']:6.2f} s   {h['detalle']}")
+    for f in findings:
+        print(f"  {f['kind']:15} {f['where']:28} "
+              f"{f['start']:6.2f} - {f['end']:6.2f} s   {f['detail']}")
 
 
-main()
+def main(argv):
+    if len(argv) < 3:
+        print(__doc__)
+        return 1
+
+    log_path, dbc_path = argv[1], argv[2]
+    table = load_log(log_path, dbc_path)
+
+    if len(argv) > 3:
+        limit = float(argv[3])
+        table = table[table["t"] <= limit]
+        print(f"Analysing up to t = {limit} s only")
+
+    report(analyse(table), table, log_path)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

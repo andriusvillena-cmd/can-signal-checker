@@ -1,0 +1,5 @@
+cantools>=39
+python-can>=4.3
+pandas>=2.0
+numpy>=1.26
+pytest>=8.0
